@@ -68,8 +68,10 @@ static int ascend_bytes_per_sample(enum AVPixelFormat sw_fmt)
     return sw_fmt == AV_PIX_FMT_P010LE ? 2 : 1;
 }
 
-/* Stride rules of the 310P DVPP: the width stride counts bytes and is
- * 16-aligned for 8-bit, 32-aligned for 10-bit; height is 16-aligned. */
+/* Stride rules: VENC/VPC want the width stride in bytes 16-aligned
+ * (32-min) and the height 2-aligned; VDEC output additionally wants a
+ * 16-aligned height, so use the max of both (16) there — handled by the
+ * decoder, this pool only guarantees the VPC/VENC rules. */
 static int ascend_width_stride(enum AVPixelFormat sw_fmt, int width)
 {
     const int bps = ascend_bytes_per_sample(sw_fmt);
@@ -79,7 +81,7 @@ static int ascend_width_stride(enum AVPixelFormat sw_fmt, int width)
 
 static int ascend_height_stride(enum AVPixelFormat sw_fmt, int height)
 {
-    return FFALIGN(height, 16);
+    return FFALIGN(height, 2);
 }
 
 static size_t ascend_frame_size(enum AVPixelFormat sw_fmt, int width, int height)
@@ -92,7 +94,6 @@ static size_t ascend_frame_size(enum AVPixelFormat sw_fmt, int width, int height
 typedef struct AscendDeviceContext {
     AVAscendDeviceContext p;
 
-    aclrtContext context;
     int context_created;
     int dvpp_inited;
     int global_inited;
@@ -107,7 +108,7 @@ static void ascend_device_uninit(AVHWDeviceContext *hwdev)
         dev->dvpp_inited = 0;
     }
     if (dev->context_created) {
-        aclrtDestroyContext(dev->context);
+        aclrtDestroyContext(dev->p.context);
         dev->context_created = 0;
     }
     aclrtResetDevice(dev->p.device_id >= 0 ? dev->p.device_id : 0);
@@ -136,14 +137,14 @@ static int ascend_device_init(AVHWDeviceContext *hwdev)
                dev->p.device_id, ret);
         goto fail;
     }
-    ret = aclrtCreateContext(&dev->context, dev->p.device_id);
+    ret = aclrtCreateContext(&dev->p.context, dev->p.device_id);
     if (ret != 0) {
         av_log(hwdev, AV_LOG_ERROR, "ascend: aclrtCreateContext failed: %d\n", ret);
         aclrtResetDevice(dev->p.device_id);
         goto fail;
     }
     dev->context_created = 1;
-    aclrtSetCurrentContext(dev->context);
+    aclrtSetCurrentContext(dev->p.context);
 
     ret = hi_mpi_sys_init();
     if (ret != 0) {
@@ -230,7 +231,7 @@ static AVBufferRef *ascend_pool_alloc(void *opaque, size_t size)
 
     /* Pool growth can happen on foreign threads; bind the device context
      * for the DVPP allocator. */
-    aclrtSetCurrentContext(dev->context);
+    aclrtSetCurrentContext(dev->p.context);
 
     surf = av_mallocz(sizeof(*surf));
     if (!surf)
@@ -342,7 +343,7 @@ static int ascend_transfer_data_from(AVHWFramesContext *hwfc,
     /* aclrtMemcpy requires the device context of the calling thread. */
     {
         AscendDeviceContext *dev = hwfc->device_ctx->hwctx;
-        int arc = aclrtSetCurrentContext(dev->context);
+        int arc = aclrtSetCurrentContext(dev->p.context);
         if (arc != 0)
             av_log(hwfc, AV_LOG_WARNING, "ascend: SetCurrentContext %d\n", arc);
     }
@@ -379,7 +380,7 @@ static int ascend_transfer_data_to(AVHWFramesContext *hwfc,
 
     {
         AscendDeviceContext *dev = hwfc->device_ctx->hwctx;
-        int arc = aclrtSetCurrentContext(dev->context);
+        int arc = aclrtSetCurrentContext(dev->p.context);
         if (arc != 0)
             av_log(hwfc, AV_LOG_WARNING, "ascend: SetCurrentContext %d\n", arc);
     }

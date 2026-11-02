@@ -19,6 +19,8 @@
 #ifndef AVUTIL_HWCONTEXT_ASCEND_H
 #define AVUTIL_HWCONTEXT_ASCEND_H
 
+#include <acl/acl.h>
+
 #include "pixfmt.h"
 
 /**
@@ -36,6 +38,13 @@ typedef struct AVAscendDeviceContext {
      * Ascend NPU device id (-1 = unspecified; defaults to 0 on use).
      */
     int device_id;
+
+    /**
+     * ACL context created by the device (NULL before av_hwdevice_ctx_init).
+     * Foreign threads must aclrtSetCurrentContext(this) before ACL/DVPP
+     * calls touching buffers of this device.
+     */
+    aclrtContext context;
 } AVAscendDeviceContext;
 
 /**

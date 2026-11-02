@@ -78,11 +78,13 @@ static int ascend_enc_global_init(void)
     return 0;
 }
 
-static void ascend_enc_global_uninit(void)
+static void ascend_enc_global_uninit(int device_id)
 {
     pthread_mutex_lock(&ascend_enc_global_lock);
-    if (--ascend_enc_global_ref == 0)
+    if (--ascend_enc_global_ref == 0) {
+        aclrtResetDevice(device_id);
         aclFinalize();
+    }
     pthread_mutex_unlock(&ascend_enc_global_lock);
 }
 
@@ -392,11 +394,31 @@ static int ascend_encode_cb(AVCodecContext *avctx, AVPacket *pkt,
         }
 
         if (frame->format == AV_PIX_FMT_ASCEND) {
-            fi.v_frame.virt_addr[0]     = frame->data[0];
-            fi.v_frame.virt_addr[1]     = frame->data[1];
-            fi.v_frame.width_stride[0]  = frame->linesize[0] > 0 ?
-                                          frame->linesize[0] : wstride;
-            fi.v_frame.width_stride[1]  = fi.v_frame.width_stride[0];
+            /* Copy device-to-device into the staging pool: the source
+             * frame's DVPP buffer returns to its producer's pool as soon
+             * as this function returns, while VENC still references it. */
+            const int src_stride = frame->linesize[0] > 0 ?
+                                   frame->linesize[0] : wstride;
+            const uint8_t *src = frame->data[0];
+            uint8_t *dst = ctx->in_buf[ctx->in_buf_pos];
+
+            for (int y = 0; y < frame->height; y++)
+                if (aclrtMemcpy(dst + (size_t)y * wstride, frame->width,
+                                src + (size_t)y * src_stride, frame->width,
+                                ACL_MEMCPY_DEVICE_TO_DEVICE) != 0)
+                    return AVERROR_EXTERNAL;
+            dst += (size_t)wstride * hstride;
+            for (int y = 0; y < (frame->height + 1) / 2; y++)
+                if (aclrtMemcpy(dst + (size_t)y * wstride, frame->width,
+                                frame->data[1] + (size_t)y * src_stride,
+                                frame->width,
+                                ACL_MEMCPY_DEVICE_TO_DEVICE) != 0)
+                    return AVERROR_EXTERNAL;
+            fi.v_frame.virt_addr[0]     = ctx->in_buf[ctx->in_buf_pos];
+            fi.v_frame.virt_addr[1]     = (void *)((uintptr_t)ctx->in_buf[ctx->in_buf_pos] +
+                                          (size_t)wstride * hstride);
+            fi.v_frame.width_stride[0]  = wstride;
+            fi.v_frame.width_stride[1]  = wstride;
         } else {
             ret = ascend_upload_frame(avctx, frame);
             if (ret < 0)
@@ -465,8 +487,7 @@ static av_cold int ascend_encode_close(AVCodecContext *avctx)
         aclrtDestroyContext(ctx->context);
         ctx->context = NULL;
     }
-    aclrtResetDevice(ctx->device_id);
-    ascend_enc_global_uninit();
+    ascend_enc_global_uninit(ctx->device_id);
     return 0;
 }
 

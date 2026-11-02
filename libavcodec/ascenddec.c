@@ -119,11 +119,13 @@ static int ascend_global_init(void)
     return 0;
 }
 
-static void ascend_global_uninit(void)
+static void ascend_global_uninit(int device_id)
 {
     pthread_mutex_lock(&ascend_global_lock);
-    if (--ascend_global_ref == 0)
+    if (--ascend_global_ref == 0) {
+        aclrtResetDevice(device_id);
         aclFinalize();
+    }
     pthread_mutex_unlock(&ascend_global_lock);
 }
 
@@ -171,7 +173,8 @@ static void ascend_release_device(AVCodecContext *avctx)
         aclrtDestroyContext(ctx->context);
         ctx->context = NULL;
     }
-    aclrtResetDevice(ctx->device_id);
+    /* Device reset is done by ascend_global_uninit once the last user in
+     * the process closes: other codecs/hwcontexts may share the device. */
 }
 
 static av_cold int ascend_channel_create(AVCodecContext *avctx)
@@ -688,7 +691,7 @@ static av_cold int ascend_decode_close(AVCodecContext *avctx)
     }
     ascend_release_device(avctx);
     if (ctx->global_inited) {
-        ascend_global_uninit();
+        ascend_global_uninit(ctx->device_id);
         ctx->global_inited = 0;
     }
 
