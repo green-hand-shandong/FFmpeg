@@ -413,20 +413,12 @@ static int ascend_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout_m
     host = frame->buf[0]->data;
 
     {
-        const uint8_t *dev_base  = (const uint8_t *)(uintptr_t)fi.v_frame.virt_addr[0];
-        const uint8_t *dev_chroma = dev_base + stride * (size_t)ctx->out_height_stride;
-
-        for (int y = 0; y < fi.v_frame.height; y++)
-            if (aclrtMemcpy(host + (size_t)y * stride, fi.v_frame.width,
-                            dev_base + (size_t)y * stride,
-                            fi.v_frame.width, ACL_MEMCPY_DEVICE_TO_HOST) != 0)
-                goto copy_fail;
-        for (int y = 0; y < fi.v_frame.height / 2; y++)
-            if (aclrtMemcpy(host + stride * (size_t)ctx->out_height_stride + (size_t)y * stride,
-                            fi.v_frame.width,
-                            dev_chroma + (size_t)y * stride,
-                            fi.v_frame.width, ACL_MEMCPY_DEVICE_TO_HOST) != 0)
-                goto copy_fail;
+        /* Single contiguous copy of the strided buffer; the AVFrame keeps
+         * the padded linesize, trailing padding is never read. */
+        if (aclrtMemcpy(host, frame_size,
+                        (void *)(uintptr_t)fi.v_frame.virt_addr[0], frame_size,
+                        ACL_MEMCPY_DEVICE_TO_HOST) != 0)
+            goto copy_fail;
     }
 
     ascend_return_out_buffer(ctx, fi.v_frame.virt_addr[0]);
@@ -466,7 +458,7 @@ static int ascend_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     for (;;) {
         /* hi_mpi_vdec_get_frame treats a zero timeout as "block forever",
          * so always poll with a small finite timeout. */
-        int timeout = ctx->eos_sent ? 50 : (ctx->out_pool_count == 0 ? 100 : 10);
+        int timeout = ctx->eos_sent ? 20 : (ctx->out_pool_count == 0 ? 100 : 1);
 
         ret = ascend_get_frame(avctx, frame, timeout);
         if (ret == 0)
