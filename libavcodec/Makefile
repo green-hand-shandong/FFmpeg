@@ -435,6 +435,8 @@ OBJS-$(CONFIG_H264_DECODER)            += h264dec.o h264_cabac.o h264_cavlc.o \
                                           h264_slice.o h264data.o h274.o
 OBJS-$(CONFIG_H264_AMF_ENCODER)        += amfenc_h264.o
 OBJS-$(CONFIG_H264_AMF_DECODER)        += amfdec.o
+OBJS-$(CONFIG_H264_ASCEND_DECODER)     += ascenddec.o
+OBJS-$(CONFIG_HEVC_ASCEND_DECODER)     += ascenddec.o
 OBJS-$(CONFIG_H264_CUVID_DECODER)      += cuviddec.o
 OBJS-$(CONFIG_H264_D3D12VA_ENCODER)    += d3d12va_encode_h264.o h264_levels.o \
                                           h2645data.o hw_base_encode_h264.o
