@@ -41,6 +41,8 @@ enum AVHWDeviceType {
     AV_HWDEVICE_TYPE_AMF,
     /* OpenHarmony Codec device */
     AV_HWDEVICE_TYPE_OHCODEC,
+    /* Ascend NPU (CANN DVPP) device */
+    AV_HWDEVICE_TYPE_ASCEND,
 };
 
 /**

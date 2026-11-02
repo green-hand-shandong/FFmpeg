@@ -315,6 +315,13 @@ enum AVPixelFormat {
 
     AV_PIX_FMT_MEDIACODEC, ///< hardware decoding through MediaCodec
 
+    /**
+     * Hardware surfaces for Ascend NPU DVPP (CANN).
+     * data[0] points to a DVPP device buffer (allocated via
+     * hi_mpi_dvpp_malloc), data[3] carries the pool AVBufferRef.
+     */
+    AV_PIX_FMT_ASCEND,
+
     AV_PIX_FMT_GRAY12BE,   ///<        Y        , 12bpp, big-endian
     AV_PIX_FMT_GRAY12LE,   ///<        Y        , 12bpp, little-endian
     AV_PIX_FMT_GRAY10BE,   ///<        Y        , 10bpp, big-endian

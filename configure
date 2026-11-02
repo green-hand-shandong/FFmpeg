@@ -2130,6 +2130,7 @@ EXTERNAL_LIBRARY_LIST="
     libzimg
     libzmq
     libzvbi
+    ascend
     lv2
     mediacodec
     ohcodec
@@ -7223,7 +7224,8 @@ enabled jni               && { [ $target_os = "android" ] && check_headers jni.h
 enabled ladspa            && require_headers "ladspa.h dlfcn.h"
 enabled lcms2             && require_pkg_config lcms2 "lcms2 >= 2.13" lcms2.h cmsCreateContext
 enabled libaom            && require_pkg_config libaom "aom >= 2.0.0" aom/aom_codec.h aom_codec_version
-enabled libascendcl       && require libascendcl "acl/acl.h acl/dvpp/hi_dvpp.h" hi_mpi_sys_init "-lascendcl -lacl_dvpp_mpi"
+enabled libascendcl       && require libascendcl "acl/acl.h acl/dvpp/hi_dvpp.h" hi_mpi_sys_init "-lascendcl -lacl_dvpp_mpi" &&
+                             enable ascend
 enabled liboapv           && require_pkg_config liboapv "oapv >= 0.2.0.0" "oapv/oapv.h" oapve_encode
 enabled libaribb24        && { check_pkg_config libaribb24 "aribb24 > 1.0.3" "aribb24/aribb24.h" arib_instance_new ||
                                { enabled gpl && require_pkg_config libaribb24 aribb24 "aribb24/aribb24.h" arib_instance_new; } ||

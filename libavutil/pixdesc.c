@@ -2294,6 +2294,10 @@ static const AVPixFmtDescriptor av_pix_fmt_descriptors[AV_PIX_FMT_NB] = {
         .name = "mediacodec",
         .flags = AV_PIX_FMT_FLAG_HWACCEL,
     },
+    [AV_PIX_FMT_ASCEND] = {
+        .name = "ascend",
+        .flags = AV_PIX_FMT_FLAG_HWACCEL,
+    },
     [AV_PIX_FMT_MMAL] = {
         .name = "mmal",
         .flags = AV_PIX_FMT_FLAG_HWACCEL,

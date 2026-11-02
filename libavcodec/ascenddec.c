@@ -34,6 +34,9 @@
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "decode.h"
+#include "hwaccel_internal.h"
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_ascend.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/error.h"
@@ -93,6 +96,12 @@ typedef struct AscendDecContext {
     int eos_sent;
     int drain_fail_cnt;
     AVPacket *pkt;
+
+    /* output_mode AVOption: 0 = sw copy (default), 1 = hw frames */
+    int output_mode;
+    AVBufferRef *hw_device_ref;
+    AVBufferRef *hwframe_ref;
+    AVHWFramesContext *hw_frames;
 } AscendDecContext;
 
 static int ascend_global_init(void)
@@ -179,9 +188,14 @@ static av_cold int ascend_channel_create(AVCodecContext *avctx)
     ctx->coded_height      = avctx->coded_height;
     /* 10-bit streams (H.264 High 10 / HEVC Main 10) decode to 2-byte-per-
      * sample semi-planar output (P010 layout); strides are in bytes. */
-    ctx->bytes_per_sample  = ctx->bit_depth > 8 ? 2 : 1;
-    ctx->out_width_stride  = FFALIGN(ctx->coded_width * ctx->bytes_per_sample,
-                                     ctx->bytes_per_sample > 1 ? 32 : 16);
+    /* 10-bit input streams (HEVC Main 10 / H.264 High 10) are decoded by
+     * the 310P VDEC to 8-bit NV12: the 10-bit semi-planar output formats
+     * are rejected by hi_mpi_vdec_send_stream with ILLEGAL_PARAM on this
+     * hardware/CANN combination. 10-bit passthrough output would need a
+     * different engine path; for now always output NV12. */
+    ctx->bit_depth         = 8;
+    ctx->bytes_per_sample  = 1;
+    ctx->out_width_stride  = FFALIGN(ctx->coded_width, 16);
     ctx->out_height_stride = FFALIGN(ctx->coded_height, 16);
     ctx->out_buffer_size   = (size_t)ctx->out_width_stride *
                              ctx->out_height_stride * 3 / 2;
@@ -385,6 +399,60 @@ static int ascend_send_stream(AscendDecContext *ctx, uint8_t *buf, int len,
 
 /* Fetch one decoded frame into AVFrame.
  * Returns 0 on success, AVERROR(EAGAIN) if nothing is ready. */
+/* AVBufferRef free callback for exported DVPP output buffers. */
+static void ascend_hw_frame_free(void *opaque, uint8_t *data)
+{
+    AVCodecContext *avctx = opaque;
+    AscendDecContext *ctx = avctx->priv_data;
+
+    ascend_return_out_buffer(ctx, data);
+}
+
+/* Set up (or reuse) an ASCEND hwframes context for hw output mode. */
+static int ascend_hw_frames_setup(AVCodecContext *avctx)
+{
+    AscendDecContext *ctx = avctx->priv_data;
+    AVHWFramesContext *fctx;
+    int ret;
+
+    if (ctx->hw_frames)
+        return 0;
+
+    if (!ctx->hw_device_ref) {
+        if (avctx->hw_device_ctx) {
+            ctx->hw_device_ref = av_buffer_ref(avctx->hw_device_ctx);
+        } else {
+            ret = av_hwdevice_ctx_create(&ctx->hw_device_ref,
+                                         AV_HWDEVICE_TYPE_ASCEND,
+                                         NULL, NULL, 0);
+            if (ret < 0) {
+                av_log(avctx, AV_LOG_ERROR, "ascenddec: hwdevice create failed\n");
+                return ret;
+            }
+        }
+        if (!ctx->hw_device_ref)
+            return AVERROR(ENOMEM);
+    }
+
+    ctx->hwframe_ref = av_hwframe_ctx_alloc(ctx->hw_device_ref);
+    if (!ctx->hwframe_ref)
+        return AVERROR(ENOMEM);
+    fctx = (AVHWFramesContext *)ctx->hwframe_ref->data;
+    fctx->format    = AV_PIX_FMT_ASCEND;
+    fctx->sw_format = ctx->bit_depth > 8 ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
+    fctx->width     = FFALIGN(avctx->coded_width, 16);
+    fctx->height    = FFALIGN(avctx->coded_height, 16);
+    fctx->initial_pool_size = 8;
+    ret = av_hwframe_ctx_init(ctx->hwframe_ref);
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "ascenddec: hwframes init failed: %d\n", ret);
+        av_buffer_unref(&ctx->hwframe_ref);
+        return ret;
+    }
+    ctx->hw_frames = fctx;
+    return 0;
+}
+
 static int ascend_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout_ms)
 {
     AscendDecContext *ctx = avctx->priv_data;
@@ -431,6 +499,40 @@ static int ascend_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout_m
         ascend_return_out_buffer(ctx, fi.v_frame.virt_addr[0]);
         hi_mpi_vdec_release_frame(ctx->chn, &fi);
         return ret;
+    }
+
+    if (ctx->output_mode == 1) {
+        /* Export the DVPP buffer as a hardware frame; the buffer ref owns
+         * it until release, at which point it returns to the pool. */
+        frame->buf[0] = av_buffer_create((uint8_t *)(uintptr_t)fi.v_frame.virt_addr[0],
+                                         frame_size, ascend_hw_frame_free, avctx,
+                                         0);
+        if (!frame->buf[0]) {
+            ascend_return_out_buffer(ctx, fi.v_frame.virt_addr[0]);
+            hi_mpi_vdec_release_frame(ctx->chn, &fi);
+            return AVERROR(ENOMEM);
+        }
+        /* Prevent the pool return below; ownership moved to the AVFrame. */
+        fi.v_frame.virt_addr[0] = NULL;
+
+        frame->data[0]     = frame->buf[0]->data;
+        frame->data[1]     = frame->data[0] + (size_t)stride *
+                             ctx->out_height_stride;
+        frame->data[3]     = (uint8_t *)ctx->hwframe_ref;
+        frame->linesize[0] = stride;
+        frame->linesize[1] = stride;
+        frame->width       = fi.v_frame.width;
+        frame->height      = fi.v_frame.height;
+        frame->format        = AV_PIX_FMT_ASCEND;
+        frame->hw_frames_ctx = av_buffer_ref(ctx->hwframe_ref);
+        if (!frame->hw_frames_ctx) {
+            av_buffer_unref(&frame->buf[0]);
+            hi_mpi_vdec_release_frame(ctx->chn, &fi);
+            return AVERROR(ENOMEM);
+        }
+        frame->pts         = pts;
+        hi_mpi_vdec_release_frame(ctx->chn, &fi);
+        return 0;
     }
 
     frame->buf[0] = av_buffer_alloc(frame_size);
@@ -484,6 +586,11 @@ static int ascend_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         ret = ascend_channel_create(avctx);
         if (ret < 0)
             return ret;
+        if (ctx->output_mode == 1) {
+            ret = ascend_hw_frames_setup(avctx);
+            if (ret < 0)
+                return ret;
+        }
     }
 
     for (;;) {
@@ -585,6 +692,8 @@ static av_cold int ascend_decode_close(AVCodecContext *avctx)
         ctx->global_inited = 0;
     }
 
+    av_buffer_unref(&ctx->hwframe_ref);
+    av_buffer_unref(&ctx->hw_device_ref);
     av_packet_free(&ctx->pkt);
     return 0;
 }
@@ -612,6 +721,12 @@ static void ascend_decode_flush(AVCodecContext *avctx)
 static const AVOption ascend_decode_options[] = {
     { "device_id", "Ascend NPU device id", OFFSET(device_id),
       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 31, VD },
+    { "output_mode", "output frame location", OFFSET(output_mode),
+      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VD, .unit = "output_mode" },
+    { "sw", "copy decoded frames to host memory", 0,
+      AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, VD, .unit = "output_mode" },
+    { "hw", "keep decoded frames in NPU device memory", 0,
+      AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, VD, .unit = "output_mode" },
     { NULL }
 };
 

@@ -31,6 +31,9 @@
 #include "pixfmt.h"
 
 static const HWContextType * const hw_table[] = {
+#if CONFIG_ASCEND
+    &ff_hwcontext_type_ascend,
+#endif
 #if CONFIG_CUDA
     &ff_hwcontext_type_cuda,
 #endif
@@ -91,6 +94,7 @@ static const char *const hw_type_names[] = {
     [AV_HWDEVICE_TYPE_VULKAN] = "vulkan",
     [AV_HWDEVICE_TYPE_AMF] = "amf",
     [AV_HWDEVICE_TYPE_OHCODEC] = "ohcodec",
+    [AV_HWDEVICE_TYPE_ASCEND] = "ascend",
 };
 
 typedef struct FFHWDeviceContext {
