@@ -61,9 +61,13 @@ typedef struct AscendDecContext {
     int chn_created;
     hi_vdec_chn chn;
     aclrtContext context;
+    AVCodecContext *avctx;
 
     int coded_width;
     int coded_height;
+    int bit_depth;       /* source bit depth: 8 or 10 */
+    int bytes_per_sample; /* 1 (8-bit NV12) or 2 (10-bit P010) */
+    int bit_depth_out;   /* bytes per sample: 1 (NV12) or 2 (P010) */
     int out_width_stride;
     int out_height_stride;
     size_t out_buffer_size;
@@ -173,8 +177,11 @@ static av_cold int ascend_channel_create(AVCodecContext *avctx)
 
     ctx->coded_width       = avctx->coded_width;
     ctx->coded_height      = avctx->coded_height;
-    /* 310P VDEC requires 16-aligned output strides for NV12. */
-    ctx->out_width_stride  = FFALIGN(ctx->coded_width,  16);
+    /* 10-bit streams (H.264 High 10 / HEVC Main 10) decode to 2-byte-per-
+     * sample semi-planar output (P010 layout); strides are in bytes. */
+    ctx->bytes_per_sample  = ctx->bit_depth > 8 ? 2 : 1;
+    ctx->out_width_stride  = FFALIGN(ctx->coded_width * ctx->bytes_per_sample,
+                                     ctx->bytes_per_sample > 1 ? 32 : 16);
     ctx->out_height_stride = FFALIGN(ctx->coded_height, 16);
     ctx->out_buffer_size   = (size_t)ctx->out_width_stride *
                              ctx->out_height_stride * 3 / 2;
@@ -214,10 +221,13 @@ static av_cold int ascend_channel_create(AVCodecContext *avctx)
     attr.pic_height      = ctx->coded_height;
     attr.stream_buf_size = ctx->stream_buf_size;
     attr.frame_buf_cnt   = 8 + 2 + 1;
-    buf_attr.width         = ctx->out_width_stride;
-    buf_attr.height        = ctx->out_height_stride;
-    buf_attr.bit_width     = HI_DATA_BIT_WIDTH_8;
-    buf_attr.pixel_format  = HI_PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    buf_attr.width         = ctx->coded_width;
+    buf_attr.height        = ctx->coded_height;
+    buf_attr.bit_width     = ctx->bit_depth > 8 ? HI_DATA_BIT_WIDTH_10 :
+                                                  HI_DATA_BIT_WIDTH_8;
+    buf_attr.pixel_format  = ctx->bit_depth > 8 ?
+                             HI_PIXEL_FORMAT_YUV_SEMI_PLANNER_420_10BIT :
+                             HI_PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     buf_attr.compress_mode = HI_COMPRESS_MODE_NONE;
     attr.frame_buf_size    = hi_vdec_get_pic_buf_size(type, &buf_attr);
     attr.video_attr.ref_frame_num   = 8;
@@ -289,8 +299,11 @@ static av_cold int ascend_decode_init(AVCodecContext *avctx)
 {
     AscendDecContext *ctx = avctx->priv_data;
 
+    ctx->avctx = avctx;
+
     if (avctx->pix_fmt == AV_PIX_FMT_NONE)
-        avctx->pix_fmt = AV_PIX_FMT_NV12;
+        avctx->pix_fmt = ctx->bit_depth > 8 ? AV_PIX_FMT_P010LE :
+                                              AV_PIX_FMT_NV12;
 
     ctx->pkt = av_packet_alloc();
     if (!ctx->pkt)
@@ -332,6 +345,7 @@ static int ascend_send_stream(AscendDecContext *ctx, uint8_t *buf, int len,
     hi_vdec_stream stream = { 0 };
     hi_vdec_pic_info out_pic = { 0 };
     void *out_buf = NULL;
+    int ret;
 
     if (!eos) {
         if (ctx->out_pool_count == 0)
@@ -350,11 +364,23 @@ static int ascend_send_stream(AscendDecContext *ctx, uint8_t *buf, int len,
     out_pic.height        = eos ? 0 : ctx->coded_height;
     out_pic.width_stride  = eos ? 0 : ctx->out_width_stride;
     out_pic.height_stride = eos ? 0 : ctx->out_height_stride;
-    out_pic.pixel_format  = HI_PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    out_pic.pixel_format  = ctx->bit_depth > 8 ?
+                            HI_PIXEL_FORMAT_YUV_SEMI_PLANNER_420_10BIT :
+                            HI_PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     out_pic.vir_addr      = (uint64_t)(uintptr_t)out_buf;
     out_pic.buffer_size   = out_buf ? ctx->out_buffer_size : 0;
 
-    return hi_mpi_vdec_send_stream(ctx->chn, &stream, &out_pic, 1000 /* ms */);
+    ret = hi_mpi_vdec_send_stream(ctx->chn, &stream, &out_pic, 1000 /* ms */);
+    if (ret != 0)
+        av_log(ctx->avctx, AV_LOG_ERROR,
+               "ascenddec: send_stream failed: 0x%x (len=%u w=%u h=%u "
+               "wstride=%u hstride=%u fmt=%d bufsize=%u eos=%d)\n",
+               ret, stream.len, out_pic.width, out_pic.height,
+               out_pic.width_stride, out_pic.height_stride,
+               out_pic.pixel_format, out_pic.buffer_size,
+               stream.end_of_stream);
+
+    return ret;
 }
 
 /* Fetch one decoded frame into AVFrame.
@@ -387,7 +413,10 @@ static int ascend_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout_m
     w      = fi.v_frame.width;
     pts    = fi.v_frame.pts;
     stride = fi.v_frame.width_stride[0];
-    frame_size = stride * (size_t)ctx->out_height_stride * 3 / 2;
+    /* 10-bit output is 2 bytes per sample (P010-like high-bit layout). */
+    ctx->bit_depth_out = ctx->bit_depth > 8 ? 2 : 1;
+    frame_size = stride * (size_t)ctx->out_height_stride * 3 / 2 *
+                 ctx->bit_depth_out;
 
     if (fi.v_frame.width <= 0 || fi.v_frame.height <= 0 || stride < (size_t)fi.v_frame.width ||
         !fi.v_frame.virt_addr[0]) {
@@ -425,12 +454,14 @@ static int ascend_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout_m
     hi_mpi_vdec_release_frame(ctx->chn, &fi);
 
     frame->data[0]     = host;
-    frame->data[1]     = host + stride * (size_t)ctx->out_height_stride;
-    frame->linesize[0] = stride;
-    frame->linesize[1] = stride;
+    frame->data[1]     = host + stride * (size_t)ctx->out_height_stride *
+                         ctx->bit_depth_out;
+    frame->linesize[0] = stride * ctx->bit_depth_out;
+    frame->linesize[1] = stride * ctx->bit_depth_out;
     frame->width       = fi.v_frame.width;
     frame->height      = fi.v_frame.height;
-    frame->format      = AV_PIX_FMT_NV12;
+    frame->format      = ctx->bit_depth > 8 ? AV_PIX_FMT_P010LE :
+                                              AV_PIX_FMT_NV12;
     frame->pts         = pts;
     return 0;
 
