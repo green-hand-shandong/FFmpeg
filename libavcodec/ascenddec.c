@@ -627,6 +627,13 @@ static int ascend_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             continue; /* decoder stalled; drain above until inputs are consumed */
 
         ret = ff_decode_get_packet(avctx, ctx->pkt);
+        if (ret == 0 && ctx->eos_sent) {
+            /* Reusable-stream scenarios (stream_loop) feed a new stream
+             * without a flush; reopen draining and continue decoding. */
+            av_log(avctx, AV_LOG_VERBOSE, "ascenddec: input resumed after EOS\n");
+            ctx->eos_sent       = 0;
+            ctx->drain_fail_cnt = 0;
+        }
         if (ret == AVERROR_EOF) {
             ret = ascend_send_stream(ctx, ctx->eos_buf, 0, 0, 1);
             if (ret != 0)
@@ -704,12 +711,21 @@ static av_cold int ascend_decode_close(AVCodecContext *avctx)
 static void ascend_decode_flush(AVCodecContext *avctx)
 {
     AscendDecContext *ctx = avctx->priv_data;
+    int ret;
 
     if (!ctx->chn_created)
         return;
-    hi_mpi_vdec_stop_recv_stream(ctx->chn);
-    hi_mpi_vdec_reset_chn(ctx->chn);
-    hi_mpi_vdec_start_recv_stream(ctx->chn);
+    /* stream_loop re-opens through flush; tolerate a channel that refuses
+     * the stop/reset sequence (e.g. EOS in flight) and just drop our
+     * in-flight input tracking. */
+    ret = hi_mpi_vdec_stop_recv_stream(ctx->chn);
+    if (ret == 0) {
+        ret = hi_mpi_vdec_reset_chn(ctx->chn);
+        if (ret == 0)
+            hi_mpi_vdec_start_recv_stream(ctx->chn);
+    }
+    if (ret != 0)
+        av_log(avctx, AV_LOG_WARNING, "ascenddec: flush reset failed: 0x%x\n", ret);
     for (int i = 0; i < ctx->in_flight_count; i++)
         hi_mpi_dvpp_free(ctx->in_flight[i].buf);
     ctx->in_flight_count = 0;
