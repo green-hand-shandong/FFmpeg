@@ -453,6 +453,8 @@ extern const FFFilter ff_vf_scale_cuda;
 extern const FFFilter ff_vf_scale_d3d11;
 extern const FFFilter ff_vf_scale_d3d12;
 extern const FFFilter ff_vf_scale_qsv;
+extern const FFFilter ff_vf_crop_ascend;
+extern const FFFilter ff_vf_pad_ascend;
 extern const FFFilter ff_vf_scale_ascend;
 extern const FFFilter ff_vf_scale_vaapi;
 extern const FFFilter ff_vf_scale_vt;

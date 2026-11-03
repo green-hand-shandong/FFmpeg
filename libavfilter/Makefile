@@ -482,6 +482,8 @@ OBJS-$(CONFIG_SCALE_CUDA_FILTER)             += vf_scale_cuda.o scale_eval.o sca
                                                 vf_scale_cuda.ptx.o cuda/load_helper.o
 OBJS-$(CONFIG_SCALE_QSV_FILTER)              += vf_vpp_qsv.o
 OBJS-$(CONFIG_SCALE_VAAPI_FILTER)            += vf_scale_vaapi.o
+OBJS-$(CONFIG_CROP_ASCEND_FILTER)      += vf_crop_ascend.o scale_eval.o
+OBJS-$(CONFIG_PAD_ASCEND_FILTER)       += vf_pad_ascend.o scale_eval.o
 OBJS-$(CONFIG_SCALE_ASCEND_FILTER)     += vf_scale_ascend.o scale_eval.o
 OBJS-$(CONFIG_SCALE_VT_FILTER)               += vf_scale_vt.o scale_eval.o
 OBJS-$(CONFIG_SCALE_VULKAN_FILTER)           += vf_scale_vulkan.o vulkan.o vulkan_filter.o
