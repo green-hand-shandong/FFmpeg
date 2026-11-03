@@ -169,6 +169,7 @@ static int pad_ascend_config_output(AVFilterLink *outlink)
 
     outlink->w = ctx->out_w;
     outlink->h = ctx->out_h;
+    ff_filter_link(outlink)->frame_rate = ff_filter_link(inlink)->frame_rate;
 
     if (!ctx->frames_ref) {
         ctx->frames_ref = av_hwframe_ctx_alloc(in_frames->device_ref);

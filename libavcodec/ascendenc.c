@@ -59,6 +59,7 @@ typedef struct AscendEncContext {
     int pending_frames;      /* frames sent, packets not yet collected */
 
     uint64_t frame_count;
+    uint64_t frame_count_out;
 
     /* staging DVPP input buffers; VENC references them asynchronously,
      * so frames are staged in rotation. */
@@ -350,7 +351,10 @@ static int ascend_collect_stream(AVCodecContext *avctx, AVPacket *pkt,
             pkt->size += stream.pack[i].len;
         }
     }
-    pkt->pts = pkt->dts = stream.pack[0].pts;
+    /* VENC echoes back the pts we submitted (in the input's container
+     * timebase). Downstream muxers assume a monotonically increasing
+     * sequence in the packet timebase, so renumber by frame index. */
+    pkt->pts = pkt->dts = (int64_t)ctx->frame_count_out++;
     {
         const hi_venc_h264_nalu_type h264t = stream.pack[0].data_type.h264_type;
         const hi_venc_h265_nalu_type h265t = stream.pack[0].data_type.h265_type;

@@ -103,6 +103,7 @@ static int ascend_scale_config_output(AVFilterLink *outlink)
     outlink->w = ctx->out_w;
     outlink->h = ctx->out_h;
     outlink->format = AV_PIX_FMT_ASCEND;
+    ff_filter_link(outlink)->frame_rate = ff_filter_link(inlink)->frame_rate;
 
     av_buffer_unref(&ctx->frames_ref);
     ctx->frames_ref = av_hwframe_ctx_alloc(in_frames->device_ref);
