@@ -2,6 +2,11 @@
  * Ascend NPU (Atlas 300I-Duo / Ascend 310P) hardware video encoder
  * via the CANN DVPP media APIs (hi_mpi_venc).
  *
+ * NOTE for CLI users: the hardware encoder is much faster than real-time;
+ * when transcoding offline files the CLI's default fps-mode may drop
+ * frames to keep sync. Pass -fps_mode passthrough for file transcodes
+ * (the standard practice for faster-than-realtime encoders).
+ *
  * Copyright (c) 2026 green-hand-shandong
  *
  * This file is part of FFmpeg.
@@ -60,6 +65,8 @@ typedef struct AscendEncContext {
 
     uint64_t frame_count;
     uint64_t frame_count_out;
+    int64_t  pts_lut[64];      /* submitted frame->pts ring, consumed FIFO */
+    int      pts_lut_count;
 
     /* staging DVPP input buffers; VENC references them asynchronously,
      * so frames are staged in rotation. */
@@ -351,10 +358,19 @@ static int ascend_collect_stream(AVCodecContext *avctx, AVPacket *pkt,
             pkt->size += stream.pack[i].len;
         }
     }
-    /* VENC echoes back the pts we submitted (in the input's container
-     * timebase). Downstream muxers assume a monotonically increasing
-     * sequence in the packet timebase, so renumber by frame index. */
-    pkt->pts = pkt->dts = (int64_t)ctx->frame_count_out++;
+    /* VENC echoes the frame index we submitted; map it back to the
+     * original frame pts (in the CLI-provided encoder timebase). */
+    {
+        int64_t orig = ctx->pts_lut_count > 0 ? ctx->pts_lut[0] :
+                       (int64_t)ctx->frame_count_out;
+        if (ctx->pts_lut_count > 0) {
+            memmove(ctx->pts_lut, ctx->pts_lut + 1,
+                    sizeof(ctx->pts_lut[0]) * (ctx->pts_lut_count - 1));
+            ctx->pts_lut_count--;
+        }
+        pkt->pts = pkt->dts = orig;
+    }
+    ctx->frame_count_out++;
     {
         const hi_venc_h264_nalu_type h264t = stream.pack[0].data_type.h264_type;
         const hi_venc_h265_nalu_type h265t = stream.pack[0].data_type.h265_type;
@@ -446,8 +462,10 @@ static int ascend_encode_cb(AVCodecContext *avctx, AVPacket *pkt,
         /* time_ref must be monotonically even; VDEC/VENC pairing uses it
          * for reference marking. */
         fi.v_frame.time_ref         = (uint32_t)(ctx->frame_count * 2);
-        fi.v_frame.pts              = frame->pts != AV_NOPTS_VALUE ?
-                                      (uint64_t)frame->pts : ctx->frame_count;
+        fi.v_frame.pts              = ctx->frame_count;  /* VENC echoes this back */
+        if (ctx->pts_lut_count < 64)
+            ctx->pts_lut[ctx->pts_lut_count++] =
+                frame->pts != AV_NOPTS_VALUE ? frame->pts : (int64_t)ctx->frame_count;
 
         ret = hi_mpi_venc_send_frame(ctx->chn, &fi, ASCEND_ENC_TIMEOUT_MS);
         if (ret != 0) {
