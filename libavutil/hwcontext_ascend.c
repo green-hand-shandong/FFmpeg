@@ -291,6 +291,7 @@ static void ascend_frames_uninit(AVHWFramesContext *hwfc)
 static int ascend_get_buffer(AVHWFramesContext *hwfc, AVFrame *frame)
 {
     AscendSurface *surf;
+    fprintf(stderr, "[ascend-hwctx] get_buffer called\n");
     int wstride = ascend_width_stride(hwfc->sw_format, hwfc->width);
     int hstride = ascend_height_stride(hwfc->sw_format, hwfc->height);
 
