@@ -348,6 +348,23 @@ static int ascend_transfer_data_from(AVHWFramesContext *hwfc,
             av_log(hwfc, AV_LOG_WARNING, "ascend: SetCurrentContext %d\n", arc);
     }
 
+    /* When the AVFrame linesize equals the device width stride (the
+     * common case), each plane is contiguous on both sides: copy Y and
+     * UV as two bulk memcpys using the actual host plane sizes. */
+    if (dst->linesize[0] == wstride && dst->linesize[1] == wstride) {
+        const size_t y_bytes = (size_t)wstride * hstride;
+        const size_t c_bytes = (size_t)wstride * (hstride / 2);
+
+        if (aclrtMemcpy(dst->data[0], y_bytes, dev_base, y_bytes,
+                        ACL_MEMCPY_DEVICE_TO_HOST) != 0)
+            return AVERROR_EXTERNAL;
+        if (aclrtMemcpy(dst->data[1], c_bytes,
+                        dev_base + y_bytes, c_bytes,
+                        ACL_MEMCPY_DEVICE_TO_HOST) != 0)
+            return AVERROR_EXTERNAL;
+        return 0;
+    }
+
     for (int p = 0; p < 2 && !ret; p++) {
         const uint8_t *src_p = dev_base + (p == 0 ? 0 : (size_t)wstride * hstride);
         uint8_t *dst_p = p == 0 ? dst->data[0] : dst->data[1];
