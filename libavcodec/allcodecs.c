@@ -876,6 +876,7 @@ extern const FFCodec ff_h264_amf_decoder;
 extern const FFCodec ff_h264_ascend_decoder;
 extern const FFCodec ff_hevc_ascend_decoder;
 extern const FFCodec ff_jpeg_ascend_decoder;
+extern const FFCodec ff_jpeg_ascend_encoder;
 extern const FFCodec ff_mjpeg_ascend_decoder;
 extern const FFCodec ff_h264_ascend_encoder;
 extern const FFCodec ff_hevc_ascend_encoder;

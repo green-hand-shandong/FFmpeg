@@ -438,6 +438,7 @@ OBJS-$(CONFIG_H264_AMF_DECODER)        += amfdec.o
 OBJS-$(CONFIG_H264_ASCEND_DECODER)     += ascenddec.o
 OBJS-$(CONFIG_HEVC_ASCEND_DECODER)     += ascenddec.o
 OBJS-$(CONFIG_JPEG_ASCEND_DECODER)     += ascendjpeg.o
+OBJS-$(CONFIG_JPEG_ASCEND_ENCODER)     += ascendjpege.o
 OBJS-$(CONFIG_MJPEG_ASCEND_DECODER)    += ascendjpeg.o
 OBJS-$(CONFIG_H264_ASCEND_ENCODER)     += ascendenc.o
 OBJS-$(CONFIG_HEVC_ASCEND_ENCODER)     += ascendenc.o
