@@ -114,7 +114,7 @@ static int ascend_scale_config_output(AVFilterLink *outlink)
     fctx->sw_format = in_frames->sw_format;
     fctx->width     = ctx->out_w;
     fctx->height    = ctx->out_h;
-    fctx->initial_pool_size = 8;
+    fctx->initial_pool_size = 16;
     ret = av_hwframe_ctx_init(ctx->frames_ref);
     if (ret < 0) {
         av_buffer_unref(&ctx->frames_ref);

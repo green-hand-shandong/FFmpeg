@@ -57,6 +57,7 @@ typedef struct AscendEncContext {
     int rc_mode;      /* 0=cbr, 1=vbr, 2=avbr, 3=fixqp */
     int gop;
     int qp;           /* fixqp I qp; P = qp + 2 */
+    int zero_copy;    /* feed hw frames to VENC without staging copy */
 
     int chn_created;
     hi_venc_chn chn;
@@ -72,6 +73,13 @@ typedef struct AscendEncContext {
      * so frames are staged in rotation. */
     void *in_buf[4];
     int in_buf_count;
+
+    /* zero-copy mode: pending input frame buf refs held until the
+     * corresponding encoded packet is collected */
+    AVBufferRef *pending_bufs[16];
+    int pending_buf_count;
+    AVPacket *out_q[16];
+    int out_q_count;
     int in_buf_pos;
     size_t in_buf_size;
 } AscendEncContext;
@@ -385,6 +393,12 @@ static int ascend_collect_stream(AVCodecContext *avctx, AVPacket *pkt,
     av_freep(&stream.pack);
     *got_packet_ptr = 1;
     ctx->pending_frames = FFMAX(ctx->pending_frames - 1, 0);
+    if (ctx->pending_buf_count > 0) {
+        av_buffer_unref(&ctx->pending_bufs[0]);
+        memmove(&ctx->pending_bufs[0], &ctx->pending_bufs[1],
+                sizeof(ctx->pending_bufs[0]) * (ctx->pending_buf_count - 1));
+        ctx->pending_buf_count--;
+    }
     return 0;
 }
 
@@ -413,7 +427,42 @@ static int ascend_encode_cb(AVCodecContext *avctx, AVPacket *pkt,
                 return 0;
         }
 
-        if (frame->format == AV_PIX_FMT_ASCEND) {
+        if (frame->format == AV_PIX_FMT_ASCEND && ctx->zero_copy &&
+            frame->buf[0]) {
+            /* Zero-copy: the frame's DVPP buffer is referenced directly
+             * by VENC; hold the buf ref until the encoded packet for
+             * this frame is collected. */
+            if (ctx->pending_buf_count >= (int)FF_ARRAY_ELEMS(ctx->pending_bufs)) {
+                /* pool pressure: drain one encoded packet into the output
+                 * queue (releases its input buf ref) before staging. */
+                AVPacket *drain = av_packet_alloc();
+                int got = 0;
+
+                if (drain) {
+                    int dr = ascend_collect_stream(avctx, drain, 1000, &got);
+                    if (dr < 0) {
+                        av_packet_free(&drain);
+                        return dr;
+                    }
+                    if (got && ctx->out_q_count < (int)FF_ARRAY_ELEMS(ctx->out_q))
+                        ctx->out_q[ctx->out_q_count++] = drain;
+                    else
+                        av_packet_free(&drain);
+                }
+            }
+            if (ctx->pending_buf_count < (int)FF_ARRAY_ELEMS(ctx->pending_bufs)) {
+                ctx->pending_bufs[ctx->pending_buf_count++] =
+                    av_buffer_ref(frame->buf[0]);
+            } else {
+                av_log(avctx, AV_LOG_ERROR, "ascendenc: pending bufs full\n");
+                return AVERROR(ENOMEM);
+            }
+            fi.v_frame.virt_addr[0]     = frame->data[0];
+            fi.v_frame.virt_addr[1]     = frame->data[1];
+            fi.v_frame.width_stride[0]  = frame->linesize[0] > 0 ?
+                                          frame->linesize[0] : wstride;
+            fi.v_frame.width_stride[1]  = fi.v_frame.width_stride[0];
+        } else if (frame->format == AV_PIX_FMT_ASCEND) {
             /* Copy device-to-device into the staging pool: the source
              * frame's DVPP buffer returns to its producer's pool as soon
              * as this function returns, while VENC still references it. */
@@ -481,6 +530,27 @@ static int ascend_encode_cb(AVCodecContext *avctx, AVPacket *pkt,
         ctx->frame_count++;
         ctx->pending_frames++;
         ctx->in_buf_pos = (ctx->in_buf_pos + 1) % ctx->in_buf_count;
+
+        /* zero-copy staging holds pool buffers: force a synchronized
+         * collect so pending refs don't exhaust upstream pools. */
+        if (ctx->zero_copy && frame->format == AV_PIX_FMT_ASCEND) {
+            ret = ascend_collect_stream(avctx, pkt, 200, got_packet_ptr);
+            if (ret < 0)
+                return ret;
+            if (*got_packet_ptr)
+                return 0;
+        }
+    }
+
+    /* First emit any packet queued during backpressure. */
+    if (ctx->out_q_count > 0) {
+        av_packet_move_ref(pkt, ctx->out_q[0]);
+        av_packet_free(&ctx->out_q[0]);
+        memmove(&ctx->out_q[0], &ctx->out_q[1],
+                sizeof(ctx->out_q[0]) * (ctx->out_q_count - 1));
+        ctx->out_q_count--;
+        *got_packet_ptr = 1;
+        return 0;
     }
 
     /* Collect whatever encoded output is ready. */
@@ -528,6 +598,9 @@ static const AVOption ascend_encode_options[] = {
       AV_OPT_TYPE_INT, { .i64 = 250 }, 1, 65536, VE },
     { "qp",    "fixed I-frame QP (fixqp mode)", OFFSET(qp),
       AV_OPT_TYPE_INT, { .i64 = 30 }, 0, 51, VE },
+    { "zero_copy", "feed ASCEND hw frames to VENC without staging copy "
+                   "(requires -output_mode hw decode upstream)",
+      OFFSET(zero_copy), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { NULL }
 };
 
