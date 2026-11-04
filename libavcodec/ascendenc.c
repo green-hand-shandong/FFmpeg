@@ -29,6 +29,7 @@
 #include "config_components.h"
 
 #include <pthread.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -128,6 +129,26 @@ static void ascend_enc_chn_free(hi_venc_chn chn)
     pthread_mutex_unlock(&ascend_enc_global_lock);
 }
 
+/* Pick the first usable Ascend device by probing the runtime's logical
+ * device ids (container-aware). */
+static int ascend_enc_pick_device(AVCodecContext *avctx, AscendEncContext *ctx)
+{
+    unsigned int count = 0;
+    unsigned int id;
+
+    if (aclrtGetDeviceCount(&count) != 0 || count == 0) {
+        av_log(avctx, AV_LOG_ERROR, "ascendenc: no Ascend devices present\n");
+        return AVERROR(ENODEV);
+    }
+
+    for (id = 0; id < count; id++) {
+        ctx->device_id = (int)id;
+        av_log(avctx, AV_LOG_VERBOSE, "ascendenc: auto-picked device %u\n", id);
+        return 0;
+    }
+    return AVERROR(ENODEV);
+}
+
 static av_cold int ascend_encode_init(AVCodecContext *avctx)
 {
     AscendEncContext *ctx = avctx->priv_data;
@@ -146,6 +167,12 @@ static av_cold int ascend_encode_init(AVCodecContext *avctx)
         avctx->bit_rate = 4 * 1000 * 1000;
         av_log(avctx, AV_LOG_WARNING, "ascendenc: no bitrate set, using %d kbps\n",
                avctx->bit_rate / 1000);
+    }
+
+    if (ctx->device_id < 0) {
+        int ret = ascend_enc_pick_device(avctx, ctx);
+        if (ret < 0)
+            return ret;
     }
 
     fps = avctx->framerate.num > 0 ?
@@ -586,8 +613,8 @@ static av_cold int ascend_encode_close(AVCodecContext *avctx)
 #define OFFSET(x) offsetof(AscendEncContext, x)
 #define VE (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM)
 static const AVOption ascend_encode_options[] = {
-    { "device_id", "Ascend NPU device id", OFFSET(device_id),
-      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 31, VE },
+    { "device_id", "Ascend NPU device id (-1 = auto-pick first available)", OFFSET(device_id),
+      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 31, VE },
     { "rc_mode", "rate control mode", OFFSET(rc_mode),
       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 3, VE, .unit = "rc" },
     { "cbr",   "constant bitrate",  0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, VE, .unit = "rc" },

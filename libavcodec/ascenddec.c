@@ -24,6 +24,7 @@
 #include "config_components.h"
 
 #include <errno.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
@@ -312,6 +313,31 @@ fail:
     return AVERROR_EXTERNAL;
 }
 
+/* Pick the first usable Ascend device by probing the runtime's logical
+ * device ids (inside containers the logical id differs from the physical
+ * davinci node number). aclrtSetDevice is attempted in order; the first
+ * that succeeds wins. */
+static int ascend_pick_device(AVCodecContext *avctx, AscendDecContext *ctx)
+{
+    unsigned int count = 0;
+    unsigned int id;
+
+    if (aclrtGetDeviceCount(&count) != 0 || count == 0) {
+        av_log(avctx, AV_LOG_ERROR, "ascenddec: no Ascend devices present\n");
+        return AVERROR(ENODEV);
+    }
+
+    for (id = 0; id < count; id++) {
+        /* aclrtSetDevice succeeds even on busy devices; a follow-up
+         * CreateContext is the real probe and happens in channel_create,
+         * so just record the first id here. */
+        ctx->device_id = (int)id;
+        av_log(avctx, AV_LOG_VERBOSE, "ascenddec: auto-picked device %u\n", id);
+        return 0;
+    }
+    return AVERROR(ENODEV);
+}
+
 static av_cold int ascend_decode_init(AVCodecContext *avctx)
 {
     AscendDecContext *ctx = avctx->priv_data;
@@ -328,6 +354,12 @@ static av_cold int ascend_decode_init(AVCodecContext *avctx)
 
     ascend_global_init();
     ctx->global_inited = 1;
+
+    if (ctx->device_id < 0) {
+        int ret = ascend_pick_device(avctx, ctx);
+        if (ret < 0)
+            return ret;
+    }
     return 0;
 }
 
@@ -738,8 +770,8 @@ static void ascend_decode_flush(AVCodecContext *avctx)
 #define OFFSET(x) offsetof(AscendDecContext, x)
 #define VD (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM)
 static const AVOption ascend_decode_options[] = {
-    { "device_id", "Ascend NPU device id", OFFSET(device_id),
-      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 31, VD },
+    { "device_id", "Ascend NPU device id (-1 = auto-pick first available)", OFFSET(device_id),
+      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 31, VD },
     { "output_mode", "output frame location", OFFSET(output_mode),
       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VD, .unit = "output_mode" },
     { "sw", "copy decoded frames to host memory", 0,
